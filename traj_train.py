@@ -2,7 +2,7 @@ import argparse
 import numpy as np
 import torch
 import torch.optim as optim
-# from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 import os
 import random
 import logging
@@ -52,7 +52,7 @@ parser.add_argument("--resume", default="", type=str)
 bestADE = 100
 
 
-def train(args, model, train_loader, optimizer, epoch):     # , writer
+def train(args, model, train_loader, optimizer, epoch, writer):     # , writer
     losses = utils.AverageMeter("Loss", ":.6f")
     progress = utils.ProgressMeter(
         len(train_loader), [losses], prefix="Epoch: [{}]".format(epoch)
@@ -81,7 +81,7 @@ def train(args, model, train_loader, optimizer, epoch):     # , writer
 
         ratio = np.exp(-(epoch)/20)
 
-        pred_seq_fake = model(traj_gt_rel, seq_start_end, teacher_forcing_ratio=ratio)
+        pred_seq_fake = model(traj_gt, seq_start_end, teacher_forcing_ratio=ratio)
 
         l2_loss = utils.l2_loss(pred_seq_fake, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
 
@@ -95,7 +95,7 @@ def train(args, model, train_loader, optimizer, epoch):     # , writer
         if batch_idx % args.print_every == 0:
             progress.display(batch_idx)
 
-    # writer.add_scalar("train_loss", losses.avg, epoch)
+    writer.add_scalar("train_loss", losses.avg, epoch)
 
 
 def validate(args, model, val_loader, epoch, writer):
@@ -120,7 +120,7 @@ def validate(args, model, val_loader, epoch, writer):
             loss_mask = loss_mask[:, args.obs_len:]
             traj_gt = torch.cat((obs_traj, pred_traj_gt), dim=0)
 
-            pred_traj_fake_rel = model(obs_traj, obs_traj_rel, seq_start_end)
+            pred_traj_fake_rel = model(obs_traj, seq_start_end)
 
             pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
 
@@ -157,7 +157,7 @@ def main(args):
     logging.info("Initializing val dataset")
     _, val_loader = data_loader(args, val_path)
 
-    # writer = SummaryWriter()
+    writer = SummaryWriter()
 
     model = TrajectoryPrediction(
         obs_len=args.obs_len,
@@ -189,29 +189,29 @@ def main(args):
     global bestADE
 
     for epoch in range(args.start_epoch, args.num_epoch):
-        train(args, model, train_loader, optimizer, epoch)
+        # train(args, model, train_loader, optimizer, epoch)
 
-        # if epoch < 100:   # 调整 ?
-        #     train(args, model, train_loader, optimizer, epoch, writer)
-        # else:
-        #     train(args, model, train_loader, optimizer, epoch, writer)
-        #
-        #     ADE = validate(args, model, val_loader, epoch, writer)
-        #     is_best = ADE < bestADE
-        #     bestADE = min(ADE, bestADE)
-        #
-        #     utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
-        #         {
-        #             "epoch": epoch + 1,
-        #             "state_dict": model.state_dict(),
-        #             "best_ADE": bestADE,
-        #             "optimizer": optimizer.state_dict(),
-        #         },
-        #         is_best,
-        #         f"./checkpoint/checkpoint{epoch}.pth.tar",
-        #     )
+        if epoch < 0:   # 调整 ?
+            train(args, model, train_loader, optimizer, epoch, writer)
+        else:
+            train(args, model, train_loader, optimizer, epoch, writer)
 
-    # writer.close()
+            ADE = validate(args, model, val_loader, epoch, writer)
+            is_best = ADE < bestADE
+            bestADE = min(ADE, bestADE)
+
+            utils.save_checkpoint(  # if ADE > bestADE, save checkpoint
+                {
+                    "epoch": epoch + 1,
+                    "state_dict": model.state_dict(),
+                    "best_ADE": bestADE,
+                    "optimizer": optimizer.state_dict(),
+                },
+                is_best,
+                f"./checkpoint/checkpoint{epoch}.pth.tar",
+            )
+
+    writer.close()
 
 
 if __name__ == '__main__':
