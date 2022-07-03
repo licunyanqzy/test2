@@ -48,6 +48,7 @@ parser.add_argument("--use_gpu", default=True, type=bool)
 parser.add_argument("--print_every", default=10, type=int)
 
 parser.add_argument("--resume", default="", type=str)
+# /home/lcy/PycharmProjects/2/p2/checkpoint/checkpoint7.pth.tar
 
 bestADE = 100
 
@@ -81,7 +82,7 @@ def train(args, model, train_loader, optimizer, epoch, writer):     # , writer
 
         ratio = np.exp(-(epoch)/20)
 
-        pred_seq_fake = model(traj_gt, seq_start_end, teacher_forcing_ratio=ratio)
+        pred_seq_fake = model(traj_gt_rel, seq_start_end, teacher_forcing_ratio=ratio)
 
         l2_loss = utils.l2_loss(pred_seq_fake, pred_traj_gt_rel, loss_mask, mode="raw").unsqueeze(1)
 
@@ -120,7 +121,7 @@ def validate(args, model, val_loader, epoch, writer):
             loss_mask = loss_mask[:, args.obs_len:]
             traj_gt = torch.cat((obs_traj, pred_traj_gt), dim=0)
 
-            pred_traj_fake_rel = model(obs_traj, seq_start_end)
+            pred_traj_fake_rel = model(obs_traj_rel, seq_start_end)
 
             pred_traj_fake_abs = utils.relative_to_abs(pred_traj_fake_rel, obs_traj[-1])
 

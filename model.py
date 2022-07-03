@@ -3,7 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 from sklearn.cluster import SpectralClustering
+import numpy as np
 import os
+from multiprocessing.dummy import Pool as ThreadPool
 
 
 class Clustering(nn.Module):
@@ -15,6 +17,8 @@ class Clustering(nn.Module):
 
         self.node_embedding = nn.Linear(self.node_dim, self.node_embedding_dim)
         self.self_attention = nn.Linear(self.node_embedding_dim * 2, 1)
+        self.leakyReLU = nn.LeakyReLU(negative_slope=0.2)
+        self.softmax = nn.Softmax(dim=0)
 
     def cal_edge(self, node):
         n = node.size()[0]      # node [3,192]
@@ -23,17 +27,54 @@ class Clustering(nn.Module):
         node_self = node_other.transpose(0, 1)
         node_self_embedding = self.node_embedding(node_self)
         node_inter = torch.cat([node_other_embedding, node_self_embedding], dim=-1)
-        edge = self.self_attention(node_inter)
-        return edge.squeeze(-1)     # [3,3,1] -> [3,3]
+        edge = self.softmax(self.leakyReLU(self.self_attention(node_inter).squeeze(-1)))
+
+        triu_0 = torch.triu(edge, diagonal=0)
+        triu_1 = torch.triu(edge, diagonal=1).t()
+        edge_output = triu_0 + triu_1       # symmetric ...
+
+        return edge_output
+
+    def kmeans(self, x, ncluster, niter=10):
+        N, D = x.size()     # [21,2]
+        c = x[torch.randperm(N)[:ncluster]]
+        for i in range(niter):
+            a = ((x[:, None, :] - c[None, :, :]) ** 2).sum(-1).argmin(1)
+            c = torch.stack([x[a==k].mean(0) for k in range(ncluster)])
+            nanix = torch.any(torch.isnan(c), dim=1)
+            ndead = nanix.sum().item()
+            c[nanix] = x[torch.randperm(N)[:ndead]]
+
+        group = ((x[:, None, :] - c[None, :, :]) ** 2).sum(-1).argmin(1)
+        return group
 
     def forward(self, node):
         n = node.size()[0]
         edge = self.cal_edge(node)
 
-        k_group = 1     # k_group 应改为用 n 表示，即根据不同的场景人数动态变化, to be continued...
-        sc = SpectralClustering(n_clusters=k_group, affinity="precomputed")
-        sc.fit(edge.detach().cpu().numpy())
-        group = torch.tensor(sc.labels_).cuda().squeeze(0)
+        # sklearn
+        # k_group = int(np.ceil(n/2))     # k_group 改为用 n 表示, 即根据场景人数动态变化
+        # sc = SpectralClustering(n_clusters=k_group, affinity="precomputed")
+        # sc.fit(edge.detach().cpu().numpy())
+        # group = torch.tensor(sc.labels_).cuda().squeeze(0)
+
+        # hand-crafted
+        W = edge
+
+        degreeMatrix = torch.sum(W, dim=1)
+        L = torch.diag(degreeMatrix) - W
+        sqrtDegreeMatrix = torch.diag(1.0 / (degreeMatrix ** 0.5))
+        L_sym = torch.matmul(torch.matmul(sqrtDegreeMatrix, L), sqrtDegreeMatrix)
+        lam, H = torch.eig(L_sym, eigenvectors=True)    # [21,21]
+        lam_r = lam[:, 0]
+        t = torch.argsort(lam_r)
+        H = torch.cat([H[:, t[0]].unsqueeze(-1), H[:, t[1]].unsqueeze(-1)], dim=1)  # [21,2]
+        s = torch.sqrt(torch.sum(H ** 2, dim=1)).unsqueeze(-1)
+        H_norm = H / s
+
+        k_group = int(np.ceil(n / 2))
+        labels = self.kmeans(H_norm, k_group)
+        group = labels
 
         return group, edge
 
@@ -60,8 +101,12 @@ class SignedGraph(nn.Module):
         group_ext = group.unsqueeze(0).repeat(n, 1).view(n, n, 1).squeeze(-1)
         # self_flag = group_ext.diag().repeat(n, 1).view(n, n, 1).squeeze(-1)
         self_flag = group_ext.transpose(1, 0)
-        positive = torch.tensor(self_flag == group_ext, dtype=torch.float).cuda()
-        negative = torch.tensor(self_flag != group_ext, dtype=torch.float).cuda()
+
+        # positive = torch.tensor(self_flag == group_ext, dtype=torch.float).cuda()
+        # negative = torch.tensor(self_flag != group_ext, dtype=torch.float).cuda()
+        positive = (self_flag == group_ext).float().clone()
+        negative = (self_flag != group_ext).float().clone()
+
         neg_inf = (-1e8) * torch.ones(n, n).cuda()
         positive = torch.where(positive == 0, neg_inf, positive)
         negative = torch.where(negative == 0, neg_inf, negative)
@@ -167,29 +212,44 @@ class TrajectoryPrediction(nn.Module):
                 else:
                     input_data = self.relu(self.inputEmbedding(traj_output))
 
+                if i % 12 == 4:
+                    decoder_hidden_state = self.social(decoder_hidden_state, seq_start_end)
+
                 decoder_hidden_state, decoder_cell_state = self.decoderLSTM(
                     input_data.squeeze(0), (decoder_hidden_state, decoder_cell_state)
                 )
                 traj_output = self.hidden2traj(decoder_hidden_state)
-                # 相对坐标 -> 绝对坐标, to be continued...
 
-                decoder_hidden_state = self.social(decoder_hidden_state, seq_start_end)
                 pred_seq += [traj_output]
         else:
             for i in range(self.pred_len):
-                input_data = traj_real_embedding[-self.pred_len + i]
+                input_data = self.relu(self.inputEmbedding(traj_output))
+
+                if i % 12 == 4:
+                    decoder_hidden_state = self.social(decoder_hidden_state, seq_start_end)
+
                 decoder_hidden_state, decoder_cell_state = self.decoderLSTM(
                     input_data.squeeze(0), (decoder_hidden_state, decoder_cell_state)
                 )
                 traj_output = self.hidden2traj(decoder_hidden_state)
 
-                decoder_hidden_state = self.social(decoder_hidden_state, seq_start_end)
                 pred_seq += [traj_output]
 
         pred_seq_output = torch.stack(pred_seq)
         return pred_seq_output
 
     def social(self, hidden_state, seq_start_end):
+        # input_list = []
+        # for start, end in seq_start_end.data:
+        #     input_list.append(hidden_state[start:end, :])
+        #
+        # pool = ThreadPool()
+        # outputs = pool.map(self.signedGraph, input_list)
+        # pool.close()
+        # pool.join()
+        # output_hidden_state = torch.cat(outputs, dim=0)
+        # return output_hidden_state
+
         outputs = []
         for start, end in seq_start_end.data:
             curr_hidden_state = hidden_state[start:end, :]
@@ -199,7 +259,7 @@ class TrajectoryPrediction(nn.Module):
         return output_hidden_state
 
     def forward(
-            self, input_traj, seq_start_end, teacher_forcing_ratio,
+            self, input_traj, seq_start_end, teacher_forcing_ratio=0.5,
     ):
         encoder_hidden_state = self.encoder(input_traj)
         encoder_hidden_state_noise = self.add_noise(encoder_hidden_state, seq_start_end)
@@ -207,6 +267,4 @@ class TrajectoryPrediction(nn.Module):
             encoder_hidden_state_noise, input_traj, seq_start_end, teacher_forcing_ratio,
         )
         return pred_seq
-
-
 

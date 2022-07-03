@@ -5,6 +5,7 @@ import torch
 from data.loader import data_loader
 from model import TrajectoryPrediction
 import utils
+from utils import int_tuple
 
 
 parser = argparse.ArgumentParser()
@@ -14,7 +15,7 @@ parser.add_argument("--dataset_name", default="eth", type=str)
 parser.add_argument("--delim", default="\t")
 parser.add_argument("--loader_num_workers", default=1, type=int)
 parser.add_argument("--skip", default=1, type=int)
-parser.add_argument("--batch_size", default=32, type=int)
+parser.add_argument("--batch_size", default=8, type=int)
 parser.add_argument("--seed", default=72, type=int)
 
 parser.add_argument("--obs_len", default=8, type=int)
@@ -28,7 +29,7 @@ parser.add_argument("--k_group", default=5, type=int)
 parser.add_argument("--dropout", default=0, type=float)     # dropout rate
 parser.add_argument("--alpha", default=0.2, type=float)   # alpha for the leaky relu
 
-parser.add_argument("--noise_dim", default=64, type=int)
+parser.add_argument("--noise_dim", default=(64,), type=int_tuple)
 parser.add_argument("--noise_type", default="gaussian", type=str)
 
 parser.add_argument("--best_k", default=20, type=int)
@@ -36,9 +37,9 @@ parser.add_argument("--best_k", default=20, type=int)
 parser.add_argument("--gpu_num", default="0", type=str)
 parser.add_argument("--dset_type", default="test", type=str)
 parser.add_argument(
-    "--resume", default="./checkpoint/checkpoint10.pth.tar", type=str,
+    "--resume", default="./checkpoint/checkpoint13.pth.tar", type=str,
     metavar="PATH", help="path to latest checkpoint (default: none)"
-)
+)   # /home/lcy/PycharmProjects/2/p3/checkpoint/checkpoint9.pth.tar
 parser.add_argument("--num_samples", default=20, type=int)
 
 
@@ -56,13 +57,6 @@ def evaluate_helper(error, seq_start_end):
 
 
 def get_model(checkpoint):
-    n_units = [
-        [args.action_encoder_hidden_dim]
-        + [int(x) for x in args.hidden_units.strip().split(",")]
-        + [args.action_encoder_hidden_dim]
-    ]
-    n_heads = [int(x) for x in args.heads.strip().split(",")]
-
     model = TrajectoryPrediction(
         obs_len=args.obs_len,
         pred_len=args.pred_len,
@@ -76,19 +70,6 @@ def get_model(checkpoint):
     model.cuda()
     model.eval()
     return model
-
-
-def main(args):
-    checkpoint = torch.load(args.resume)
-    model = get_model(checkpoint)
-    path = utils.get_dset_path(args.dataset_name, args.dset_type)
-    _, loader = data_loader(args, path)
-    ADE, FDE = evaluate(args, loader, model)
-    print(
-        "Dataset: {}, Pred Len: {}, ADE: {:.12f}, FDE: {:.12f}".format(
-            args.dataset_name, args.pred_len, ADE, FDE
-        )
-    )
 
 
 def evaluate(args, loader, model):
@@ -114,7 +95,7 @@ def evaluate(args, loader, model):
             for _ in range(args.num_samples):
                 # traj_rel_gt = torch.cat((obs_traj_rel, pred_traj_gt_rel), dim=0)
 
-                pred_traj_fake_rel = model(obs_traj, obs_traj_rel, seq_start_end)
+                pred_traj_fake_rel = model(obs_traj_rel, seq_start_end)
 
                 # pred_traj_fake = pred_action_fake
                 # pred_traj_fake_predpart = pred_traj_fake[-args.pred_len:]
@@ -123,7 +104,7 @@ def evaluate(args, loader, model):
                 ADE_, FDE_ = utils.cal_ADE_FDE(pred_traj_gt, pred_traj_fake_abs, mode="raw")
 
                 temp = utils.loss_test(pred_traj_fake_abs, pred_traj_gt)
-                print(temp)
+                # print(temp)
 
                 ADE.append(ADE_)
                 FDE.append(FDE_)
@@ -137,6 +118,21 @@ def evaluate(args, loader, model):
         FDE_output = sum(FDE_outer) / traj_sum
 
         return ADE_output, FDE_output
+
+
+def main(args):
+    print(args.resume)
+
+    checkpoint = torch.load(args.resume)
+    model = get_model(checkpoint)
+    path = utils.get_dset_path(args.dataset_name, args.dset_type)
+    _, loader = data_loader(args, path)
+    ADE, FDE = evaluate(args, loader, model)
+    print(
+        "Dataset: {}, Pred Len: {}, ADE: {:.12f}, FDE: {:.12f}".format(
+            args.dataset_name, args.pred_len, ADE, FDE
+        )
+    )
 
 
 if __name__ == "__main__":
